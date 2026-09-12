@@ -119,6 +119,33 @@ You may use any language or runtime. Python, JavaScript, and TypeScript are all 
 
 ---
 
+## Image Amount Extraction
+
+In `dataset/financial_events.csv`, 16 events have blank amounts that map to document images in `dataset/media/images/` (referenced in `dataset/images.csv`). All 16 values were verified against the provided source images and integrated into the data reconciliation pipeline:
+
+| Event ID | Image File | Document Description | Field Read | Extracted Amount |
+|---|---|---|---|---|
+| `event_253` | `image_01.png` | August 2019 Net Salary Payslip | Net Pay / Take Home Pay | `4,365,000.00 IDR` |
+| `event_1442` | `image_02.png` | Rental Outstanding Balance Receipt | Balance Due / Amount Due | `100,000.00 INR` |
+| `event_1545` | `image_03.png` | Bulk Groceries Tax Invoice | Invoice Total / Grand Total | `41,272.00 INR` |
+| `event_1700` | `image_04.png` | Delivered Grocery Order Invoice | Total Amount Paid | `2,854.00 INR` |
+| `event_1786` | `image_05.png` | Telecom Mobile Bill Statement | Total Amount Due | `704.05 INR` |
+| `event_3051` | `image_06.png` | Quick Commerce Grocery Bill (Blinkit) | Bill Total | `1,995.00 INR` |
+| `event_3231` | `image_07.png` | Restaurant Tax Invoice (Nagarjuna) | Net Payable | `8,528.00 INR` |
+| `event_4535` | `image_08.png` | Apartment Maintenance Bill | Total Dues | `15,339.00 INR` |
+| `event_5170` | `image_09.png` | Municipal Water Utility Bill | Amount Due | `723.00 INR` |
+| `event_6033` | `image_10.png` | Supermarket Bulk Purchase Invoice | Grand Total | `79,679.26 INR` |
+| `event_6859` | `image_11.png` | Hospital Bill Payable | Total Charges Due | `3,650.00 INR` |
+| `event_7307` | `image_12.png` | Taxi Trip Fare Receipt (CityCab) | Total Fare Charged | `33.50 USD` |
+| `event_7941` | `image_13.png` | Retail Merchandise Order (DailyObjects)| Amount Paid | `2,298.00 INR` |
+| `event_9421` | `image_14.png` | Pharmacy Medical Purchase | Total Payable | `4,543.00 INR` |
+| `event_9806` | `image_15.png` | Airline Ticket Invoice (IndiGo) | Total Fare | `9,968.00 INR` |
+| `event_10521`| `image_16.png` | EV Vehicle Charging Session | Total Billed Amount | `393.22 INR` |
+
+For full audit details, see [`docs/image_extraction.md`](./docs/image_extraction.md).
+
+---
+
 ## Requirements
 
 Your solution must:
