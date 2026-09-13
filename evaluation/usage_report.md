@@ -5,17 +5,17 @@ Evaluation Run Report
 
 ## Execution Summary
 
-- **Run Timestamp**: 2026-09-13 06:42:46 UTC
+- **Run Timestamp**: 2026-09-13 07:13:57 UTC
 - **Total Requests Evaluated**: 250
 - **Primary Decision Architecture**: Deterministic Financial Simulation Engine & Symbolic Logic Evaluator
-- **Execution Mode**: Local deterministic pipeline (no external API keys detected)
+- **Execution Mode**: Configured LLM (Google Gemini gemini-3.6-flash) - Calls Failed / Fallback Active
 
 ## Model Call Metrics
 
 | Model Provider | Model Name | Calls | Input Tokens | Output Tokens | Total Tokens | Estimated Cost (USD) |
 |---|---|---|---|---|---|---|
-| Rule-Based Symbolic Simulator | FinancialEngine-v1 | 250 | 0 | 0 | 0 | $0.0000 |
-| **Overall Total** | | **250** | **0** | **0** | **0** | **$0.0000** |
+| Google Gemini | gemini-3.6-flash | 0 | 0 | 0 | 0 | $0.0000 |
+| **Overall Total** | | **0** | **0** | **0** | **0** | **$0.0000** |
 
 ## Per-Request Averages
 
@@ -30,22 +30,22 @@ Evaluation Run Report
 
 | Event ID | Image File | Resolved Amount | Resolution Method | Benchmark Ref | Status |
 |---|---|---|---|---|---|
-| `event_253` | `image_01.png` | 4,365,000.00 | `fallback_after_failed_vision_call` | 4,365,000.00 | Verified Match |
-| `event_1442` | `image_02.png` | 100,000.00 | `fallback_after_failed_vision_call` | 100,000.00 | Verified Match |
-| `event_1545` | `image_03.png` | 41,272.00 | `fallback_after_failed_vision_call` | 41,272.00 | Verified Match |
-| `event_1700` | `image_04.png` | 2,854.00 | `fallback_after_failed_vision_call` | 2,854.00 | Verified Match |
-| `event_1786` | `image_05.png` | 704.05 | `fallback_after_failed_vision_call` | 704.05 | Verified Match |
-| `event_3051` | `image_06.png` | 1,995.00 | `fallback_after_failed_vision_call` | 1,995.00 | Verified Match |
-| `event_3231` | `image_07.png` | 8,528.00 | `fallback_after_failed_vision_call` | 8,528.00 | Verified Match |
-| `event_4535` | `image_08.png` | 15,339.00 | `fallback_after_failed_vision_call` | 15,339.00 | Verified Match |
-| `event_5170` | `image_09.png` | 723.00 | `fallback_after_failed_vision_call` | 723.00 | Verified Match |
-| `event_6033` | `image_10.png` | 79,679.26 | `fallback_after_failed_vision_call` | 79,679.26 | Verified Match |
-| `event_6859` | `image_11.png` | 3,650.00 | `fallback_after_failed_vision_call` | 3,650.00 | Verified Match |
-| `event_7307` | `image_12.png` | 33.50 | `fallback_after_failed_vision_call` | 33.50 | Verified Match |
-| `event_7941` | `image_13.png` | 2,298.00 | `fallback_after_failed_vision_call` | 2,298.00 | Verified Match |
-| `event_9421` | `image_14.png` | 4,543.00 | `fallback_after_failed_vision_call` | 4,543.00 | Verified Match |
-| `event_9806` | `image_15.png` | 9,968.00 | `fallback_after_failed_vision_call` | 9,968.00 | Verified Match |
-| `event_10521` | `image_16.png` | 393.22 | `fallback_after_failed_vision_call` | 393.22 | Verified Match |
+| `event_253` | `image_01.png` | 4,365,000.00 | `fallback_after_failed_vision_call` (failed_call: HTTP 429 (Daily quota limit reached)) | 4,365,000.00 | Verified Match |
+| `event_1442` | `image_02.png` | 100,000.00 | `fallback_after_failed_vision_call` (failed_call: HTTP 429 (Daily quota limit reached)) | 100,000.00 | Verified Match |
+| `event_1545` | `image_03.png` | 41,272.00 | `fallback_after_failed_vision_call` (failed_call: HTTP 429 (Daily quota limit reached)) | 41,272.00 | Verified Match |
+| `event_1700` | `image_04.png` | 2,854.00 | `fallback_after_failed_vision_call` (failed_call: HTTP 429 (Daily quota limit reached)) | 2,854.00 | Verified Match |
+| `event_1786` | `image_05.png` | 704.05 | `fallback_after_failed_vision_call` (failed_call: HTTP 429 (Daily quota limit reached)) | 704.05 | Verified Match |
+| `event_3051` | `image_06.png` | 1,995.00 | `fallback_after_failed_vision_call` (failed_call: HTTP 429 (Daily quota limit reached)) | 1,995.00 | Verified Match |
+| `event_3231` | `image_07.png` | 8,528.00 | `fallback_after_failed_vision_call` (failed_call: HTTP 429 (Daily quota limit reached)) | 8,528.00 | Verified Match |
+| `event_4535` | `image_08.png` | 15,339.00 | `fallback_after_failed_vision_call` (failed_call: HTTP 429 (Daily quota limit reached)) | 15,339.00 | Verified Match |
+| `event_5170` | `image_09.png` | 723.00 | `fallback_after_failed_vision_call` (failed_call: HTTP 429 (Daily quota limit reached)) | 723.00 | Verified Match |
+| `event_6033` | `image_10.png` | 79,679.26 | `fallback_after_failed_vision_call` (failed_call: HTTP 429 (Daily quota limit reached)) | 79,679.26 | Verified Match |
+| `event_6859` | `image_11.png` | 3,650.00 | `fallback_after_failed_vision_call` (failed_call: HTTP 429 (Daily quota limit reached)) | 3,650.00 | Verified Match |
+| `event_7307` | `image_12.png` | 33.50 | `fallback_after_failed_vision_call` (failed_call: HTTP 429 (Daily quota limit reached)) | 33.50 | Verified Match |
+| `event_7941` | `image_13.png` | 2,298.00 | `fallback_after_failed_vision_call` (failed_call: HTTP 429 (Daily quota limit reached)) | 2,298.00 | Verified Match |
+| `event_9421` | `image_14.png` | 4,543.00 | `fallback_after_failed_vision_call` (failed_call: HTTP 429 (Daily quota limit reached)) | 4,543.00 | Verified Match |
+| `event_9806` | `image_15.png` | 9,968.00 | `fallback_after_failed_vision_call` (failed_call: HTTP 429 (Daily quota limit reached)) | 9,968.00 | Verified Match |
+| `event_10521` | `image_16.png` | 393.22 | `fallback_after_failed_vision_call` (failed_call: HTTP 429 (Daily quota limit reached)) | 393.22 | Verified Match |
 
 ## Notes
 

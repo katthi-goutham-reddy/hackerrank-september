@@ -77,6 +77,7 @@ class LLMClient:
         'claude-3-5-sonnet-20241022': {'in': 3.000 / 1e6, 'out': 15.000 / 1e6},
         'gemini-1.5-flash': {'in': 0.075 / 1e6, 'out': 0.300 / 1e6},
         'gemini-2.0-flash': {'in': 0.100 / 1e6, 'out': 0.400 / 1e6},
+        'gemini-3.6-flash': {'in': 0.100 / 1e6, 'out': 0.400 / 1e6},
         'llama-3.1-8b-instant': {'in': 0.050 / 1e6, 'out': 0.080 / 1e6},
     }
 
@@ -102,7 +103,23 @@ class LLMClient:
         self.provider = None
         self.model_name = None
 
-        if self.openai_key:
+        pref = os.environ.get("LLM_PROVIDER", "").lower()
+        if pref in ["gemini", "google", "google gemini"] and self.gemini_key:
+            self.provider = "Google Gemini"
+            self.model_name = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
+        elif pref in ["openai"] and self.openai_key:
+            self.provider = "OpenAI"
+            self.model_name = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+        elif pref in ["anthropic", "claude"] and self.anthropic_key:
+            self.provider = "Anthropic"
+            self.model_name = os.environ.get("ANTHROPIC_MODEL", "claude-3-5-haiku-20241022")
+        elif pref in ["groq"] and self.groq_key:
+            self.provider = "Groq"
+            self.model_name = os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant")
+        elif self.gemini_key and not self.openai_key:
+            self.provider = "Google Gemini"
+            self.model_name = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
+        elif self.openai_key:
             self.provider = "OpenAI"
             self.model_name = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
         elif self.anthropic_key:
@@ -110,7 +127,7 @@ class LLMClient:
             self.model_name = os.environ.get("ANTHROPIC_MODEL", "claude-3-5-haiku-20241022")
         elif self.gemini_key:
             self.provider = "Google Gemini"
-            self.model_name = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash")
+            self.model_name = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
         elif self.groq_key:
             self.provider = "Groq"
             self.model_name = os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant")
@@ -134,6 +151,21 @@ class LLMClient:
         if self.provider == "Google Gemini" and self.gemini_key:
             return True
         return False
+
+    def _sanitize(self, text: str) -> str:
+        """Redacts potential API keys and Authorization headers from error strings."""
+        if not text:
+            return ""
+        sanitized = str(text)
+        sanitized = re.sub(r'Bearer\s+[A-Za-z0-9_\-\.]+', 'Bearer [REDACTED]', sanitized)
+        sanitized = re.sub(r'key=[A-Za-z0-9_\-]+', 'key=[REDACTED]', sanitized)
+        sanitized = re.sub(r'sk-[A-Za-z0-9_\-]{10,}', '[REDACTED_API_KEY]', sanitized)
+        sanitized = re.sub(r'AIza[0-9A-Za-z-_]{30,}', '[REDACTED_API_KEY]', sanitized)
+        sanitized = re.sub(r'gsk_[A-Za-z0-9_\-]{20,}', '[REDACTED_API_KEY]', sanitized)
+        for k in [self.openai_key, self.anthropic_key, self.gemini_key, self.groq_key]:
+            if k and len(k) > 5:
+                sanitized = sanitized.replace(k, '[REDACTED_KEY]')
+        return sanitized
 
     def query_completion(self, system_prompt: str, user_prompt: str) -> str:
         """Invokes the active LLM provider via standard HTTP and tracks token usage."""
@@ -210,18 +242,26 @@ class LLMClient:
                         if parts:
                             return parts[0].get('text', '').strip()
 
+        except urllib.error.HTTPError as e:
+            try:
+                body = e.read().decode('utf-8', errors='ignore')
+            except Exception:
+                body = ""
+            safe_body = self._sanitize(body)
+            sys.stderr.write(f"LLM API HTTP Error ({self.provider}, {self.model_name}) - Status {e.code}: {safe_body}\n")
         except Exception as e:
-            # Non-blocking fallback to symbolic generation
-            pass
+            safe_err = self._sanitize(f"{type(e).__name__}: {str(e)}")
+            sys.stderr.write(f"LLM API Exception ({self.provider}, {self.model_name}): {safe_err}\n")
 
         return ""
 
-    def extract_amount_from_image(self, image_path: Path, strict: bool = False) -> tuple:
+    def extract_amount_from_image(self, image_path: Path, strict: bool = False, retry_429: bool = True) -> tuple:
         """Extracts numeric financial amount from a document image using multi-modal vision models."""
         if not self.has_vision or not image_path.exists():
             return None, "fallback_no_key_configured"
 
         import base64
+        import time
         try:
             with open(image_path, "rb") as f:
                 img_b64 = base64.b64encode(f.read()).decode('utf-8')
@@ -272,6 +312,7 @@ class LLMClient:
                     val = self._parse_numeric_amount(raw_text)
                     if val is not None:
                         return val, f"live_vision:{self.provider}:{self.model_name}"
+                    return None, f"parse_error: '{raw_text[:50]}'"
 
             elif self.provider == "Anthropic":
                 endpoint = "https://api.anthropic.com/v1/messages"
@@ -312,6 +353,7 @@ class LLMClient:
                     val = self._parse_numeric_amount(raw_text)
                     if val is not None:
                         return val, f"live_vision:{self.provider}:{self.model_name}"
+                    return None, f"parse_error: '{raw_text[:50]}'"
 
             elif self.provider == "Google Gemini":
                 endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent?key={self.gemini_key}"
@@ -321,14 +363,14 @@ class LLMClient:
                         "parts": [
                             {"text": prompt_text},
                             {
-                                "inline_data": {
-                                    "mime_type": "image/png",
+                                "inlineData": {
+                                    "mimeType": "image/png",
                                     "data": img_b64
                                 }
                             }
                         ]
                     }],
-                    "generationConfig": {"temperature": 0.0, "maxOutputTokens": 64}
+                    "generationConfig": {"temperature": 0.0, "maxOutputTokens": 256}
                 }
                 req = urllib.request.Request(endpoint, data=json.dumps(payload).encode('utf-8'), headers=headers, method='POST')
                 with urllib.request.urlopen(req, timeout=25) as resp:
@@ -345,16 +387,38 @@ class LLMClient:
                             val = self._parse_numeric_amount(raw_text)
                             if val is not None:
                                 return val, f"live_vision:{self.provider}:{self.model_name}"
+                            return None, f"parse_error: '{raw_text[:50]}'"
+                    return None, f"parse_error: 'no_candidate'"
 
+        except urllib.error.HTTPError as e:
+            try:
+                body = e.read().decode('utf-8', errors='ignore')
+            except Exception:
+                body = ""
+            safe_body = self._sanitize(body)
+            sys.stderr.write(f"Vision API HTTP Error ({self.provider}, {self.model_name}) on {image_path.name} - Status {e.code}: {safe_body}\n")
+            if e.code == 429 and retry_429:
+                if "PerDay" in safe_body:
+                    sys.stderr.write(f"Daily quota limit reached on {image_path.name}. Proceeding to verified fallback.\n")
+                    snippet = safe_body[:100].replace('\n', ' ').strip()
+                    return None, f"failed_call: HTTP 429 (Daily quota limit reached)"
+                m_delay = re.search(r'retryDelay":\s*"(\d+)s"', safe_body)
+                wait_sec = int(m_delay.group(1)) + 2 if m_delay else 20
+                if wait_sec <= 45:
+                    sys.stderr.write(f"Rate limit (429) on {image_path.name}. Backing off for {wait_sec}s before retry...\n")
+                    time.sleep(wait_sec)
+                    return self.extract_amount_from_image(image_path, strict=strict, retry_429=False)
+            snippet = safe_body[:100].replace('\n', ' ').strip()
+            return None, f"failed_call: HTTP 429 ({snippet})" if e.code == 429 else f"failed_call: HTTP {e.code} ({snippet})"
         except Exception as e:
-            pass
-
-        return None, "failed_call"
+            safe_err = self._sanitize(f"{type(e).__name__}: {str(e)}")
+            sys.stderr.write(f"Vision API Exception ({self.provider}, {self.model_name}) on {image_path.name}: {safe_err}\n")
+            return None, f"failed_call: {type(e).__name__}"
 
     def _parse_numeric_amount(self, text: str) -> float:
         """Extracts clean numeric float from LLM text response."""
         clean = text.replace(',', '').strip()
-        m = re.search(r"(\d+(?:\.\d{1,2})?)", clean)
+        m = re.search(r"(\d+(?:\.\d+)?)", clean)
         if m:
             try:
                 return float(m.group(1))
@@ -452,6 +516,7 @@ class FinancialDataReconciler:
 
             extracted_val = None
             resolution_method = "fallback_no_key_configured"
+            error_detail = None
 
             if self.llm_client and self.llm_client.has_vision and img_path.exists():
                 # Attempt 1: Standard multi-modal vision prompt
@@ -460,13 +525,16 @@ class FinancialDataReconciler:
                     extracted_val = val
                     resolution_method = method
                 else:
+                    error_detail = method
                     # Attempt 2: Strict retry prompt
                     val_retry, method_retry = self.llm_client.extract_amount_from_image(img_path, strict=True)
                     if val_retry is not None:
                         extracted_val = val_retry
                         resolution_method = method_retry
+                        error_detail = None
                     else:
                         resolution_method = "fallback_after_failed_vision_call"
+                        error_detail = method_retry or error_detail
 
             if extracted_val is None:
                 # Fallback to verified reference lookup value
@@ -480,6 +548,7 @@ class FinancialDataReconciler:
                 'image_id': img_id,
                 'amount': extracted_val,
                 'method': resolution_method,
+                'error_detail': error_detail,
                 'verified_ref': ref_val,
                 'match': is_match
             })
@@ -1177,7 +1246,7 @@ def generate_usage_report(output_file: Path, num_requests: int, llm_client: LLMC
     """Generates the required token usage and cost analysis report including image extraction audit."""
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
-    if llm_client and llm_client.is_configured and llm_client.total_calls > 0:
+    if llm_client and llm_client.is_configured:
         provider = llm_client.provider
         model_name = llm_client.model_name
         calls = llm_client.total_calls
@@ -1189,7 +1258,10 @@ def generate_usage_report(output_file: Path, num_requests: int, llm_client: LLMC
         avg_out = out_tok / max(1, num_requests)
         avg_tot = tot_tok / max(1, num_requests)
         avg_cost = cost / max(1, num_requests)
-        exec_mode = f"Hybrid LLM-Assisted Decision Engine ({provider} {model_name})"
+        if calls > 0:
+            exec_mode = f"Hybrid LLM-Assisted Decision Engine ({provider} {model_name})"
+        else:
+            exec_mode = f"Configured LLM ({provider} {model_name}) - Calls Failed / Fallback Active"
         table_row = f"| {provider} | {model_name} | {calls} | {in_tok:,} | {out_tok:,} | {tot_tok:,} | ${cost:.4f} |"
     else:
         provider = "Rule-Based Symbolic Simulator"
@@ -1224,9 +1296,14 @@ def generate_usage_report(output_file: Path, num_requests: int, llm_client: LLMC
             img = f"{e['image_id']}.png"
             amt = f"{e['amount']:,.2f}"
             meth = e['method']
+            err_det = e.get('error_detail')
+            if meth == 'fallback_after_failed_vision_call' and err_det:
+                meth_display = f"`{meth}` ({err_det})"
+            else:
+                meth_display = f"`{meth}`"
             ref = f"{e['verified_ref']:,.2f}" if e.get('verified_ref') is not None else "N/A"
             status = "Verified Match" if e.get('match', True) else "Discrepancy"
-            audit_table_rows.append(f"| `{eid}` | `{img}` | {amt} | `{meth}` | {ref} | {status} |")
+            audit_table_rows.append(f"| `{eid}` | `{img}` | {amt} | {meth_display} | {ref} | {status} |")
         audit_table_str = "\n".join(audit_table_rows)
     else:
         audit_summary_line = "**Compliance Status**: 0/16 events resolved via live vision API calls; 16/16 via fallback (16 due to no key configured, 0 due to failed calls)."
