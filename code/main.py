@@ -125,7 +125,9 @@ class LLMClient:
         self.total_output_tokens = 0
         self.total_cost = 0.0
         self.last_call_time = 0.0
-        self.rate_limit_delay = float(os.environ.get("RATE_LIMIT_DELAY", "30.0"))
+        self.rate_limit_delay = float(os.environ.get("RATE_LIMIT_DELAY", "2.0"))
+        self.gemini_exhausted = False
+        self.groq_exhausted = False
 
     @property
     def is_configured(self) -> bool:
@@ -161,7 +163,7 @@ class LLMClient:
         elapsed = now - self.last_call_time
         if elapsed < delay and self.last_call_time > 0:
             sleep_needed = delay - elapsed
-            sys.stderr.write(f"Pacing API calls (rate limit {delay:.0f}s): sleeping {sleep_needed:.1f}s...\n")
+            sys.stderr.write(f"Pacing API calls (rate limit {delay:.1f}s): sleeping {sleep_needed:.1f}s...\n")
             time.sleep(sleep_needed)
         self.last_call_time = time.time()
 
@@ -171,7 +173,7 @@ class LLMClient:
             return ""
 
         # 1. Primary: Gemini
-        if self.gemini_key:
+        if self.gemini_key and not self.gemini_exhausted:
             try:
                 self._apply_rate_limit()
                 endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent?key={self.gemini_key}"
@@ -192,12 +194,23 @@ class LLMClient:
                         parts = candidates[0]['content'].get('parts', [])
                         if parts:
                             return parts[0].get('text', '').strip()
+            except urllib.error.HTTPError as e:
+                try:
+                    body = e.read().decode('utf-8', errors='ignore')
+                except Exception:
+                    body = ""
+                safe_body = self._sanitize(body)
+                if e.code == 429 and ("PerDay" in safe_body or "RESOURCE_EXHAUSTED" in safe_body or "Quota exceeded" in safe_body):
+                    self.gemini_exhausted = True
+                    sys.stderr.write("Gemini daily quota limit reached. Disabling Gemini for subsequent calls.\n")
+                else:
+                    sys.stderr.write(f"Gemini Completion Error: {self._sanitize(str(e))}. Falling back...\n")
             except Exception as e:
                 safe_err = self._sanitize(f"{type(e).__name__}: {str(e)}")
                 sys.stderr.write(f"Gemini Completion Error: {safe_err}. Falling back...\n")
 
         # 2. Fallback: Groq
-        if self.groq_key:
+        if self.groq_key and not self.groq_exhausted:
             try:
                 self._apply_rate_limit()
                 endpoint = "https://api.groq.com/openai/v1/chat/completions"
@@ -223,6 +236,17 @@ class LLMClient:
                     out_tok = usage.get('completion_tokens', 0)
                     self._record_usage(in_tok, out_tok, groq_model)
                     return data['choices'][0]['message']['content'].strip()
+            except urllib.error.HTTPError as e:
+                try:
+                    body = e.read().decode('utf-8', errors='ignore')
+                except Exception:
+                    body = ""
+                safe_body = self._sanitize(body)
+                if e.code in (401, 403) or "invalid_api_key" in safe_body:
+                    self.groq_exhausted = True
+                    sys.stderr.write("Groq key invalid/unauthorized. Disabling Groq for subsequent calls.\n")
+                else:
+                    sys.stderr.write(f"Groq Completion Error: {self._sanitize(str(e))}\n")
             except Exception as e:
                 safe_err = self._sanitize(f"{type(e).__name__}: {str(e)}")
                 sys.stderr.write(f"Groq Completion Error: {safe_err}\n")
@@ -256,7 +280,7 @@ class LLMClient:
         # Tier 1: Primary Vision API (Google Gemini)
         # ---------------------------------------------------------------------
         gemini_error = None
-        if self.gemini_key:
+        if self.gemini_key and not self.gemini_exhausted:
             try:
                 self._apply_rate_limit()
                 endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent?key={self.gemini_key}"
@@ -292,10 +316,13 @@ class LLMClient:
                     body = ""
                 safe_body = self._sanitize(body)
                 sys.stderr.write(f"Gemini Vision HTTP {e.code} on {image_path.name}: {safe_body}\n")
-                if e.code == 429 and retry_429 and "PerDay" not in safe_body:
+                if e.code == 429 and ("PerDay" in safe_body or "RESOURCE_EXHAUSTED" in safe_body or "Quota exceeded" in safe_body):
+                    self.gemini_exhausted = True
+                    sys.stderr.write("Gemini daily quota limit reached. Disabling Gemini for subsequent calls.\n")
+                elif e.code == 429 and retry_429:
                     m_delay = re.search(r'retryDelay":\s*"(\d+)s"', safe_body)
-                    wait_sec = int(m_delay.group(1)) + 2 if m_delay else 20
-                    if wait_sec <= 45:
+                    wait_sec = int(m_delay.group(1)) + 2 if m_delay else 15
+                    if wait_sec <= 30:
                         sys.stderr.write(f"Gemini Rate limit (429) on {image_path.name}. Retrying in {wait_sec}s...\n")
                         time.sleep(wait_sec)
                         return self.extract_amount_from_image(image_path, strict=strict, retry_429=False)
@@ -310,7 +337,7 @@ class LLMClient:
         # Tier 2: Fallback Vision API (Groq)
         # ---------------------------------------------------------------------
         groq_error = None
-        if self.groq_key:
+        if self.groq_key and not self.groq_exhausted:
             groq_models = ["llama-3.2-11b-vision-preview", "llama-3.2-90b-vision-preview"]
             for g_model in groq_models:
                 try:
@@ -351,6 +378,10 @@ class LLMClient:
                         body = ""
                     safe_body = self._sanitize(body)
                     sys.stderr.write(f"Groq Vision HTTP {e.code} ({g_model}) on {image_path.name}: {safe_body}\n")
+                    if e.code in (401, 403) or "invalid_api_key" in safe_body:
+                        self.groq_exhausted = True
+                        sys.stderr.write("Groq key invalid/unauthorized. Disabling Groq for subsequent calls.\n")
+                        break
                     snippet = safe_body[:100].replace('\n', ' ').strip()
                     groq_error = f"failed_call: Groq HTTP {e.code} ({snippet})"
                 except Exception as e:
