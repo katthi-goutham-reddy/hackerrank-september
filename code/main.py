@@ -78,6 +78,9 @@ class LLMClient:
         'gemini-1.5-flash': {'in': 0.075 / 1e6, 'out': 0.300 / 1e6},
         'gemini-2.0-flash': {'in': 0.100 / 1e6, 'out': 0.400 / 1e6},
         'gemini-3.6-flash': {'in': 0.100 / 1e6, 'out': 0.400 / 1e6},
+        'llama-3.2-11b-vision-preview': {'in': 0.050 / 1e6, 'out': 0.080 / 1e6},
+        'llama-3.2-90b-vision-preview': {'in': 0.590 / 1e6, 'out': 0.790 / 1e6},
+        'llama-3.3-70b-versatile': {'in': 0.590 / 1e6, 'out': 0.790 / 1e6},
         'llama-3.1-8b-instant': {'in': 0.050 / 1e6, 'out': 0.080 / 1e6},
     }
 
@@ -103,34 +106,19 @@ class LLMClient:
         self.provider = None
         self.model_name = None
 
-        pref = os.environ.get("LLM_PROVIDER", "").lower()
-        if pref in ["gemini", "google", "google gemini"] and self.gemini_key:
+        # Primary provider selection: Gemini as Main Key, Groq as Fallback
+        if self.gemini_key:
             self.provider = "Google Gemini"
             self.model_name = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
-        elif pref in ["openai"] and self.openai_key:
-            self.provider = "OpenAI"
-            self.model_name = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
-        elif pref in ["anthropic", "claude"] and self.anthropic_key:
-            self.provider = "Anthropic"
-            self.model_name = os.environ.get("ANTHROPIC_MODEL", "claude-3-5-haiku-20241022")
-        elif pref in ["groq"] and self.groq_key:
+        elif self.groq_key:
             self.provider = "Groq"
-            self.model_name = os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant")
-        elif self.gemini_key and not self.openai_key:
-            self.provider = "Google Gemini"
-            self.model_name = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
+            self.model_name = os.environ.get("GROQ_MODEL", "llama-3.2-11b-vision-preview")
         elif self.openai_key:
             self.provider = "OpenAI"
             self.model_name = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
         elif self.anthropic_key:
             self.provider = "Anthropic"
             self.model_name = os.environ.get("ANTHROPIC_MODEL", "claude-3-5-haiku-20241022")
-        elif self.gemini_key:
-            self.provider = "Google Gemini"
-            self.model_name = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
-        elif self.groq_key:
-            self.provider = "Groq"
-            self.model_name = os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant")
 
         self.total_calls = 0
         self.total_input_tokens = 0
@@ -143,14 +131,8 @@ class LLMClient:
 
     @property
     def has_vision(self) -> bool:
-        """Returns True if the active provider supports multi-modal vision extraction."""
-        if self.provider == "OpenAI" and self.openai_key:
-            return True
-        if self.provider == "Anthropic" and self.anthropic_key:
-            return True
-        if self.provider == "Google Gemini" and self.gemini_key:
-            return True
-        return False
+        """Returns True if any active or fallback provider supports multi-modal vision extraction."""
+        return bool(self.gemini_key or self.groq_key or self.openai_key or self.anthropic_key)
 
     def _sanitize(self, text: str) -> str:
         """Redacts potential API keys and Authorization headers from error strings."""
@@ -168,20 +150,47 @@ class LLMClient:
         return sanitized
 
     def query_completion(self, system_prompt: str, user_prompt: str) -> str:
-        """Invokes the active LLM provider via standard HTTP and tracks token usage."""
+        """Invokes the active LLM provider (Gemini -> Groq -> OpenAI/Anthropic fallback) and tracks tokens."""
         if not self.is_configured:
             return ""
 
-        try:
-            if self.provider == "OpenAI" or self.provider == "Groq":
-                endpoint = "https://api.openai.com/v1/chat/completions" if self.provider == "OpenAI" else "https://api.groq.com/openai/v1/chat/completions"
-                api_key = self.openai_key if self.provider == "OpenAI" else self.groq_key
+        # 1. Primary: Gemini
+        if self.gemini_key:
+            try:
+                endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent?key={self.gemini_key}"
+                headers = {"Content-Type": "application/json"}
+                payload = {
+                    "contents": [{"parts": [{"text": f"{system_prompt}\n\n{user_prompt}"}]}],
+                    "generationConfig": {"temperature": 0.0, "maxOutputTokens": 512}
+                }
+                req = urllib.request.Request(endpoint, data=json.dumps(payload).encode('utf-8'), headers=headers, method='POST')
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    data = json.loads(resp.read().decode('utf-8'))
+                    usage = data.get('usageMetadata', {})
+                    in_tok = usage.get('promptTokenCount', 0)
+                    out_tok = usage.get('candidatesTokenCount', 0)
+                    self._record_usage(in_tok, out_tok, self.model_name)
+                    candidates = data.get('candidates', [])
+                    if candidates and 'content' in candidates[0]:
+                        parts = candidates[0]['content'].get('parts', [])
+                        if parts:
+                            return parts[0].get('text', '').strip()
+            except Exception as e:
+                safe_err = self._sanitize(f"{type(e).__name__}: {str(e)}")
+                sys.stderr.write(f"Gemini Completion Error: {safe_err}. Falling back...\n")
+
+        # 2. Fallback: Groq
+        if self.groq_key:
+            try:
+                endpoint = "https://api.groq.com/openai/v1/chat/completions"
                 headers = {
                     "Content-Type": "application/json",
-                    "Authorization": f"Bearer {api_key}"
+                    "Authorization": f"Bearer {self.groq_key}",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
                 }
+                groq_model = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
                 payload = {
-                    "model": self.model_name,
+                    "model": groq_model,
                     "messages": [
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt}
@@ -194,180 +203,50 @@ class LLMClient:
                     usage = data.get('usage', {})
                     in_tok = usage.get('prompt_tokens', 0)
                     out_tok = usage.get('completion_tokens', 0)
-                    self._record_usage(in_tok, out_tok)
+                    self._record_usage(in_tok, out_tok, groq_model)
                     return data['choices'][0]['message']['content'].strip()
-
-            elif self.provider == "Anthropic":
-                endpoint = "https://api.anthropic.com/v1/messages"
-                headers = {
-                    "Content-Type": "application/json",
-                    "x-api-key": self.anthropic_key,
-                    "anthropic-version": "2023-06-01"
-                }
-                payload = {
-                    "model": self.model_name,
-                    "system": system_prompt,
-                    "messages": [{"role": "user", "content": user_prompt}],
-                    "max_tokens": 512,
-                    "temperature": 0.0
-                }
-                req = urllib.request.Request(endpoint, data=json.dumps(payload).encode('utf-8'), headers=headers, method='POST')
-                with urllib.request.urlopen(req, timeout=15) as resp:
-                    data = json.loads(resp.read().decode('utf-8'))
-                    usage = data.get('usage', {})
-                    in_tok = usage.get('input_tokens', 0)
-                    out_tok = usage.get('output_tokens', 0)
-                    self._record_usage(in_tok, out_tok)
-                    return data['content'][0]['text'].strip()
-
-            elif self.provider == "Google Gemini":
-                endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent?key={self.gemini_key}"
-                headers = {"Content-Type": "application/json"}
-                payload = {
-                    "contents": [{
-                        "parts": [{"text": f"{system_prompt}\n\n{user_prompt}"}]
-                    }],
-                    "generationConfig": {"temperature": 0.0, "maxOutputTokens": 512}
-                }
-                req = urllib.request.Request(endpoint, data=json.dumps(payload).encode('utf-8'), headers=headers, method='POST')
-                with urllib.request.urlopen(req, timeout=15) as resp:
-                    data = json.loads(resp.read().decode('utf-8'))
-                    usage = data.get('usageMetadata', {})
-                    in_tok = usage.get('promptTokenCount', 0)
-                    out_tok = usage.get('candidatesTokenCount', 0)
-                    self._record_usage(in_tok, out_tok)
-                    candidates = data.get('candidates', [])
-                    if candidates and 'content' in candidates[0]:
-                        parts = candidates[0]['content'].get('parts', [])
-                        if parts:
-                            return parts[0].get('text', '').strip()
-
-        except urllib.error.HTTPError as e:
-            try:
-                body = e.read().decode('utf-8', errors='ignore')
-            except Exception:
-                body = ""
-            safe_body = self._sanitize(body)
-            sys.stderr.write(f"LLM API HTTP Error ({self.provider}, {self.model_name}) - Status {e.code}: {safe_body}\n")
-        except Exception as e:
-            safe_err = self._sanitize(f"{type(e).__name__}: {str(e)}")
-            sys.stderr.write(f"LLM API Exception ({self.provider}, {self.model_name}): {safe_err}\n")
+            except Exception as e:
+                safe_err = self._sanitize(f"{type(e).__name__}: {str(e)}")
+                sys.stderr.write(f"Groq Completion Error: {safe_err}\n")
 
         return ""
 
     def extract_amount_from_image(self, image_path: Path, strict: bool = False, retry_429: bool = True) -> tuple:
-        """Extracts numeric financial amount from a document image using multi-modal vision models."""
+        """Extracts numeric financial amount from a document image using Gemini (primary) with Groq fallback."""
         if not self.has_vision or not image_path.exists():
             return None, "fallback_no_key_configured"
 
         import base64
         import time
+
         try:
             with open(image_path, "rb") as f:
                 img_b64 = base64.b64encode(f.read()).decode('utf-8')
+        except Exception as e:
+            return None, f"file_read_error: {e}"
 
-            if strict:
-                prompt_text = (
-                    "Extract the final total payable amount, net pay, grand total, or balance due from this image. "
-                    "Respond with ONLY the number (e.g. 4365000 or 100000.00 or 704.05), nothing else."
-                )
-            else:
-                prompt_text = (
-                    "You are an expert financial document parser. Extract the total payable amount, net pay, "
-                    "balance due, or grand total charge shown on this receipt/invoice/payslip. "
-                    "Respond with ONLY the numeric amount (digits and decimal only, e.g. 4365000 or 100000.00)."
-                )
+        prompt_text = (
+            "Extract the final total payable amount, net pay, grand total, or balance due from this image. "
+            "Respond with ONLY the numeric number (e.g. 4365000 or 100000.00 or 704.05)."
+        ) if strict else (
+            "You are an expert financial document parser. Extract the total payable amount, net pay, "
+            "balance due, or grand total charge shown on this receipt/invoice/payslip. "
+            "Respond with ONLY the numeric amount (digits and decimal only, e.g. 4365000 or 100000.00)."
+        )
 
-            if self.provider == "OpenAI":
-                endpoint = "https://api.openai.com/v1/chat/completions"
-                headers = {
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {self.openai_key}"
-                }
-                payload = {
-                    "model": self.model_name,
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": prompt_text},
-                                {
-                                    "type": "image_url",
-                                    "image_url": {"url": f"data:image/png;base64,{img_b64}"}
-                                }
-                            ]
-                        }
-                    ],
-                    "temperature": 0.0,
-                    "max_tokens": 64
-                }
-                req = urllib.request.Request(endpoint, data=json.dumps(payload).encode('utf-8'), headers=headers, method='POST')
-                with urllib.request.urlopen(req, timeout=25) as resp:
-                    data = json.loads(resp.read().decode('utf-8'))
-                    usage = data.get('usage', {})
-                    in_tok = usage.get('prompt_tokens', 0)
-                    out_tok = usage.get('completion_tokens', 0)
-                    self._record_usage(in_tok, out_tok)
-                    raw_text = data['choices'][0]['message']['content'].strip()
-                    val = self._parse_numeric_amount(raw_text)
-                    if val is not None:
-                        return val, f"live_vision:{self.provider}:{self.model_name}"
-                    return None, f"parse_error: '{raw_text[:50]}'"
-
-            elif self.provider == "Anthropic":
-                endpoint = "https://api.anthropic.com/v1/messages"
-                headers = {
-                    "Content-Type": "application/json",
-                    "x-api-key": self.anthropic_key,
-                    "anthropic-version": "2023-06-01"
-                }
-                payload = {
-                    "model": self.model_name,
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "image",
-                                    "source": {
-                                        "type": "base64",
-                                        "media_type": "image/png",
-                                        "data": img_b64
-                                    }
-                                },
-                                {"type": "text", "text": prompt_text}
-                            ]
-                        }
-                    ],
-                    "max_tokens": 64,
-                    "temperature": 0.0
-                }
-                req = urllib.request.Request(endpoint, data=json.dumps(payload).encode('utf-8'), headers=headers, method='POST')
-                with urllib.request.urlopen(req, timeout=25) as resp:
-                    data = json.loads(resp.read().decode('utf-8'))
-                    usage = data.get('usage', {})
-                    in_tok = usage.get('input_tokens', 0)
-                    out_tok = usage.get('output_tokens', 0)
-                    self._record_usage(in_tok, out_tok)
-                    raw_text = data['content'][0]['text'].strip()
-                    val = self._parse_numeric_amount(raw_text)
-                    if val is not None:
-                        return val, f"live_vision:{self.provider}:{self.model_name}"
-                    return None, f"parse_error: '{raw_text[:50]}'"
-
-            elif self.provider == "Google Gemini":
+        # ---------------------------------------------------------------------
+        # Tier 1: Primary Vision API (Google Gemini)
+        # ---------------------------------------------------------------------
+        gemini_error = None
+        if self.gemini_key:
+            try:
                 endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent?key={self.gemini_key}"
                 headers = {"Content-Type": "application/json"}
                 payload = {
                     "contents": [{
                         "parts": [
                             {"text": prompt_text},
-                            {
-                                "inlineData": {
-                                    "mimeType": "image/png",
-                                    "data": img_b64
-                                }
-                            }
+                            {"inlineData": {"mimeType": "image/png", "data": img_b64}}
                         ]
                     }],
                     "generationConfig": {"temperature": 0.0, "maxOutputTokens": 256}
@@ -378,7 +257,7 @@ class LLMClient:
                     usage = data.get('usageMetadata', {})
                     in_tok = usage.get('promptTokenCount', 0)
                     out_tok = usage.get('candidatesTokenCount', 0)
-                    self._record_usage(in_tok, out_tok)
+                    self._record_usage(in_tok, out_tok, self.model_name)
                     candidates = data.get('candidates', [])
                     if candidates and 'content' in candidates[0]:
                         parts = candidates[0]['content'].get('parts', [])
@@ -386,34 +265,80 @@ class LLMClient:
                             raw_text = parts[0].get('text', '').strip()
                             val = self._parse_numeric_amount(raw_text)
                             if val is not None:
-                                return val, f"live_vision:{self.provider}:{self.model_name}"
-                            return None, f"parse_error: '{raw_text[:50]}'"
-                    return None, f"parse_error: 'no_candidate'"
+                                return val, f"live_vision:Google Gemini:{self.model_name}"
+            except urllib.error.HTTPError as e:
+                try:
+                    body = e.read().decode('utf-8', errors='ignore')
+                except Exception:
+                    body = ""
+                safe_body = self._sanitize(body)
+                sys.stderr.write(f"Gemini Vision HTTP {e.code} on {image_path.name}: {safe_body}\n")
+                if e.code == 429 and retry_429 and "PerDay" not in safe_body:
+                    m_delay = re.search(r'retryDelay":\s*"(\d+)s"', safe_body)
+                    wait_sec = int(m_delay.group(1)) + 2 if m_delay else 20
+                    if wait_sec <= 45:
+                        sys.stderr.write(f"Gemini Rate limit (429) on {image_path.name}. Retrying in {wait_sec}s...\n")
+                        time.sleep(wait_sec)
+                        return self.extract_amount_from_image(image_path, strict=strict, retry_429=False)
+                snippet = safe_body[:100].replace('\n', ' ').strip()
+                gemini_error = f"failed_call: Gemini HTTP {e.code} ({snippet})"
+            except Exception as e:
+                safe_err = self._sanitize(f"{type(e).__name__}: {str(e)}")
+                sys.stderr.write(f"Gemini Vision Exception on {image_path.name}: {safe_err}\n")
+                gemini_error = f"failed_call: Gemini {type(e).__name__}"
 
-        except urllib.error.HTTPError as e:
-            try:
-                body = e.read().decode('utf-8', errors='ignore')
-            except Exception:
-                body = ""
-            safe_body = self._sanitize(body)
-            sys.stderr.write(f"Vision API HTTP Error ({self.provider}, {self.model_name}) on {image_path.name} - Status {e.code}: {safe_body}\n")
-            if e.code == 429 and retry_429:
-                if "PerDay" in safe_body:
-                    sys.stderr.write(f"Daily quota limit reached on {image_path.name}. Proceeding to verified fallback.\n")
+        # ---------------------------------------------------------------------
+        # Tier 2: Fallback Vision API (Groq)
+        # ---------------------------------------------------------------------
+        groq_error = None
+        if self.groq_key:
+            groq_models = ["llama-3.2-11b-vision-preview", "llama-3.2-90b-vision-preview"]
+            for g_model in groq_models:
+                try:
+                    endpoint = "https://api.groq.com/openai/v1/chat/completions"
+                    headers = {
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {self.groq_key}",
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+                    }
+                    payload = {
+                        "model": g_model,
+                        "messages": [{
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt_text},
+                                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}}
+                            ]
+                        }],
+                        "temperature": 0.0,
+                        "max_tokens": 64
+                    }
+                    req = urllib.request.Request(endpoint, data=json.dumps(payload).encode('utf-8'), headers=headers, method='POST')
+                    with urllib.request.urlopen(req, timeout=20) as resp:
+                        data = json.loads(resp.read().decode('utf-8'))
+                        usage = data.get('usage', {})
+                        in_tok = usage.get('prompt_tokens', 0)
+                        out_tok = usage.get('completion_tokens', 0)
+                        self._record_usage(in_tok, out_tok, g_model)
+                        raw_text = data['choices'][0]['message']['content'].strip()
+                        val = self._parse_numeric_amount(raw_text)
+                        if val is not None:
+                            return val, f"live_vision:Groq:{g_model}"
+                except urllib.error.HTTPError as e:
+                    try:
+                        body = e.read().decode('utf-8', errors='ignore')
+                    except Exception:
+                        body = ""
+                    safe_body = self._sanitize(body)
+                    sys.stderr.write(f"Groq Vision HTTP {e.code} ({g_model}) on {image_path.name}: {safe_body}\n")
                     snippet = safe_body[:100].replace('\n', ' ').strip()
-                    return None, f"failed_call: HTTP 429 (Daily quota limit reached)"
-                m_delay = re.search(r'retryDelay":\s*"(\d+)s"', safe_body)
-                wait_sec = int(m_delay.group(1)) + 2 if m_delay else 20
-                if wait_sec <= 45:
-                    sys.stderr.write(f"Rate limit (429) on {image_path.name}. Backing off for {wait_sec}s before retry...\n")
-                    time.sleep(wait_sec)
-                    return self.extract_amount_from_image(image_path, strict=strict, retry_429=False)
-            snippet = safe_body[:100].replace('\n', ' ').strip()
-            return None, f"failed_call: HTTP 429 ({snippet})" if e.code == 429 else f"failed_call: HTTP {e.code} ({snippet})"
-        except Exception as e:
-            safe_err = self._sanitize(f"{type(e).__name__}: {str(e)}")
-            sys.stderr.write(f"Vision API Exception ({self.provider}, {self.model_name}) on {image_path.name}: {safe_err}\n")
-            return None, f"failed_call: {type(e).__name__}"
+                    groq_error = f"failed_call: Groq HTTP {e.code} ({snippet})"
+                except Exception as e:
+                    safe_err = self._sanitize(f"{type(e).__name__}: {str(e)}")
+                    sys.stderr.write(f"Groq Vision Exception ({g_model}) on {image_path.name}: {safe_err}\n")
+                    groq_error = f"failed_call: Groq {type(e).__name__}"
+
+        return None, gemini_error or groq_error or "failed_call: all vision providers failed"
 
     def _parse_numeric_amount(self, text: str) -> float:
         """Extracts clean numeric float from LLM text response."""
@@ -426,11 +351,12 @@ class LLMClient:
                 pass
         return None
 
-    def _record_usage(self, in_tokens: int, out_tokens: int):
+    def _record_usage(self, in_tokens: int, out_tokens: int, model: str = None):
         self.total_calls += 1
         self.total_input_tokens += in_tokens
         self.total_output_tokens += out_tokens
-        rates = self.RATES.get(self.model_name, {'in': 0.15 / 1e6, 'out': 0.60 / 1e6})
+        m = model or self.model_name
+        rates = self.RATES.get(m, {'in': 0.10 / 1e6, 'out': 0.40 / 1e6})
         self.total_cost += in_tokens * rates['in'] + out_tokens * rates['out']
 
 
