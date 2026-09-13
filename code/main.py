@@ -124,6 +124,8 @@ class LLMClient:
         self.total_input_tokens = 0
         self.total_output_tokens = 0
         self.total_cost = 0.0
+        self.last_call_time = 0.0
+        self.rate_limit_delay = float(os.environ.get("RATE_LIMIT_DELAY", "30.0"))
 
     @property
     def is_configured(self) -> bool:
@@ -149,6 +151,20 @@ class LLMClient:
                 sanitized = sanitized.replace(k, '[REDACTED_KEY]')
         return sanitized
 
+    def _apply_rate_limit(self, min_seconds: float = None):
+        """Paces outbound API calls by ensuring at least `delay` seconds elapse between network requests."""
+        import time
+        delay = min_seconds if min_seconds is not None else self.rate_limit_delay
+        if delay <= 0:
+            return
+        now = time.time()
+        elapsed = now - self.last_call_time
+        if elapsed < delay and self.last_call_time > 0:
+            sleep_needed = delay - elapsed
+            sys.stderr.write(f"Pacing API calls (rate limit {delay:.0f}s): sleeping {sleep_needed:.1f}s...\n")
+            time.sleep(sleep_needed)
+        self.last_call_time = time.time()
+
     def query_completion(self, system_prompt: str, user_prompt: str) -> str:
         """Invokes the active LLM provider (Gemini -> Groq -> OpenAI/Anthropic fallback) and tracks tokens."""
         if not self.is_configured:
@@ -157,6 +173,7 @@ class LLMClient:
         # 1. Primary: Gemini
         if self.gemini_key:
             try:
+                self._apply_rate_limit()
                 endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent?key={self.gemini_key}"
                 headers = {"Content-Type": "application/json"}
                 payload = {
@@ -182,6 +199,7 @@ class LLMClient:
         # 2. Fallback: Groq
         if self.groq_key:
             try:
+                self._apply_rate_limit()
                 endpoint = "https://api.groq.com/openai/v1/chat/completions"
                 headers = {
                     "Content-Type": "application/json",
@@ -240,6 +258,7 @@ class LLMClient:
         gemini_error = None
         if self.gemini_key:
             try:
+                self._apply_rate_limit()
                 endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent?key={self.gemini_key}"
                 headers = {"Content-Type": "application/json"}
                 payload = {
@@ -295,6 +314,7 @@ class LLMClient:
             groq_models = ["llama-3.2-11b-vision-preview", "llama-3.2-90b-vision-preview"]
             for g_model in groq_models:
                 try:
+                    self._apply_rate_limit()
                     endpoint = "https://api.groq.com/openai/v1/chat/completions"
                     headers = {
                         "Content-Type": "application/json",
