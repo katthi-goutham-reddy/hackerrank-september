@@ -109,7 +109,7 @@ class LLMClient:
         # Primary provider selection: Gemini as Main Key, Groq as Fallback
         if self.gemini_key:
             self.provider = "Google Gemini"
-            self.model_name = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
+            self.model_name = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash")
         elif self.groq_key:
             self.provider = "Groq"
             self.model_name = os.environ.get("GROQ_MODEL", "llama-3.2-11b-vision-preview")
