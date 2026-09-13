@@ -120,10 +120,10 @@ You may use any language or runtime. Python, JavaScript, and TypeScript are all 
 ---
 
 ## Image Amount Extraction
+ 
+In `dataset/financial_events.csv`, 16 events have blank amounts that map to document images in `dataset/media/images/` (referenced in `dataset/images.csv`). In compliance with AGENTS.md §6.4, the primary execution pipeline dynamically resolves these amounts via live multi-modal vision model calls (`LLMClient.extract_amount_from_image`), with automatic single-retry prompts and a verified benchmark fallback:
 
-In `dataset/financial_events.csv`, 16 events have blank amounts that map to document images in `dataset/media/images/` (referenced in `dataset/images.csv`). All 16 values were verified against the provided source images and integrated into the data reconciliation pipeline:
-
-| Event ID | Image File | Document Description | Field Read | Extracted Amount |
+| Event ID | Image File | Document Description | Field Read | Benchmark Verified Amount |
 |---|---|---|---|---|
 | `event_253` | `image_01.png` | August 2019 Net Salary Payslip | Net Pay / Take Home Pay | `4,365,000.00 IDR` |
 | `event_1442` | `image_02.png` | Rental Outstanding Balance Receipt | Balance Due / Amount Due | `100,000.00 INR` |
@@ -142,7 +142,7 @@ In `dataset/financial_events.csv`, 16 events have blank amounts that map to docu
 | `event_9806` | `image_15.png` | Airline Ticket Invoice (IndiGo) | Total Fare | `9,968.00 INR` |
 | `event_10521`| `image_16.png` | EV Vehicle Charging Session | Total Billed Amount | `393.22 INR` |
 
-For full audit details, see [`docs/image_extraction.md`](./docs/image_extraction.md).
+For full details on the dynamic vision pipeline and retry handling, see [`docs/image_extraction.md`](./docs/image_extraction.md).
 
 ---
 
