@@ -95,7 +95,7 @@ class LLMClient:
                         k, v = line.split('=', 1)
                         k = k.strip()
                         v = v.strip().strip("'").strip('"')
-                        if k and k not in os.environ:
+                        if k:
                             os.environ[k] = v
 
         self.openai_key = os.environ.get("OPENAI_API_KEY")
@@ -106,16 +106,16 @@ class LLMClient:
         self.provider = None
         self.model_name = None
 
-        # Primary provider selection: Gemini as Main Key, Groq as Fallback
+        # Primary provider selection: Gemini -> OpenAI -> Groq -> Anthropic
         if self.gemini_key:
             self.provider = "Google Gemini"
-            self.model_name = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash")
-        elif self.groq_key:
-            self.provider = "Groq"
-            self.model_name = os.environ.get("GROQ_MODEL", "llama-3.2-11b-vision-preview")
+            self.model_name = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
         elif self.openai_key:
             self.provider = "OpenAI"
             self.model_name = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+        elif self.groq_key:
+            self.provider = "Groq"
+            self.model_name = os.environ.get("GROQ_MODEL", "llama-3.2-11b-vision-preview")
         elif self.anthropic_key:
             self.provider = "Anthropic"
             self.model_name = os.environ.get("ANTHROPIC_MODEL", "claude-3-5-haiku-20241022")
@@ -127,7 +127,9 @@ class LLMClient:
         self.last_call_time = 0.0
         self.rate_limit_delay = float(os.environ.get("RATE_LIMIT_DELAY", "2.0"))
         self.gemini_exhausted = False
+        self.openai_exhausted = False
         self.groq_exhausted = False
+        self.anthropic_exhausted = False
 
     @property
     def is_configured(self) -> bool:
@@ -136,7 +138,7 @@ class LLMClient:
     @property
     def has_vision(self) -> bool:
         """Returns True if any active or fallback provider supports multi-modal vision extraction."""
-        return bool(self.gemini_key or self.groq_key or self.openai_key or self.anthropic_key)
+        return bool(self.gemini_key or self.openai_key or self.groq_key or self.anthropic_key)
 
     def _sanitize(self, text: str) -> str:
         """Redacts potential API keys and Authorization headers from error strings."""
@@ -168,7 +170,7 @@ class LLMClient:
         self.last_call_time = time.time()
 
     def query_completion(self, system_prompt: str, user_prompt: str) -> str:
-        """Invokes the active LLM provider (Gemini -> Groq -> OpenAI/Anthropic fallback) and tracks tokens."""
+        """Invokes the active LLM provider (Gemini -> OpenAI -> Groq fallback) and tracks tokens."""
         if not self.is_configured:
             return ""
 
@@ -177,7 +179,7 @@ class LLMClient:
             try:
                 self._apply_rate_limit()
                 endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent?key={self.gemini_key}"
-                headers = {"Content-Type": "application/json"}
+                headers = {"Content-Type": "application/json", "x-goog-api-key": self.gemini_key}
                 payload = {
                     "contents": [{"parts": [{"text": f"{system_prompt}\n\n{user_prompt}"}]}],
                     "generationConfig": {"temperature": 0.0, "maxOutputTokens": 512}
@@ -192,8 +194,9 @@ class LLMClient:
                     candidates = data.get('candidates', [])
                     if candidates and 'content' in candidates[0]:
                         parts = candidates[0]['content'].get('parts', [])
-                        if parts:
-                            return parts[0].get('text', '').strip()
+                        for p in parts:
+                            if 'text' in p and p['text'].strip():
+                                return p['text'].strip()
             except urllib.error.HTTPError as e:
                 try:
                     body = e.read().decode('utf-8', errors='ignore')
@@ -203,13 +206,50 @@ class LLMClient:
                 if e.code == 429 and ("PerDay" in safe_body or "RESOURCE_EXHAUSTED" in safe_body or "Quota exceeded" in safe_body):
                     self.gemini_exhausted = True
                     sys.stderr.write("Gemini daily quota limit reached. Disabling Gemini for subsequent calls.\n")
+                elif e.code in (400, 401, 403):
+                    self.gemini_exhausted = True
+                    sys.stderr.write(f"Gemini authentication/key error (HTTP {e.code}). Disabling Gemini.\n")
                 else:
                     sys.stderr.write(f"Gemini Completion Error: {self._sanitize(str(e))}. Falling back...\n")
             except Exception as e:
                 safe_err = self._sanitize(f"{type(e).__name__}: {str(e)}")
                 sys.stderr.write(f"Gemini Completion Error: {safe_err}. Falling back...\n")
 
-        # 2. Fallback: Groq
+        # 2. Secondary: OpenAI
+        if self.openai_key and not self.openai_exhausted:
+            try:
+                self._apply_rate_limit()
+                endpoint = "https://api.openai.com/v1/chat/completions"
+                headers = {
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {self.openai_key}"
+                }
+                o_model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+                payload = {
+                    "model": o_model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    "temperature": 0.0
+                }
+                req = urllib.request.Request(endpoint, data=json.dumps(payload).encode('utf-8'), headers=headers, method='POST')
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    data = json.loads(resp.read().decode('utf-8'))
+                    usage = data.get('usage', {})
+                    in_tok = usage.get('prompt_tokens', 0)
+                    out_tok = usage.get('completion_tokens', 0)
+                    self._record_usage(in_tok, out_tok, o_model)
+                    return data['choices'][0]['message']['content'].strip()
+            except urllib.error.HTTPError as e:
+                if e.code in (401, 403):
+                    self.openai_exhausted = True
+                    sys.stderr.write(f"OpenAI authentication error (HTTP {e.code}). Disabling OpenAI.\n")
+            except Exception as e:
+                safe_err = self._sanitize(f"{type(e).__name__}: {str(e)}")
+                sys.stderr.write(f"OpenAI Completion Error: {safe_err}\n")
+
+        # 3. Fallback: Groq
         if self.groq_key and not self.groq_exhausted:
             try:
                 self._apply_rate_limit()
@@ -254,7 +294,7 @@ class LLMClient:
         return ""
 
     def extract_amount_from_image(self, image_path: Path, strict: bool = False, retry_429: bool = True) -> tuple:
-        """Extracts numeric financial amount from a document image using Gemini (primary) with Groq fallback."""
+        """Extracts numeric financial amount from a document image using multi-tier vision providers."""
         if not self.has_vision or not image_path.exists():
             return None, "fallback_no_key_configured"
 
@@ -284,7 +324,7 @@ class LLMClient:
             try:
                 self._apply_rate_limit()
                 endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent?key={self.gemini_key}"
-                headers = {"Content-Type": "application/json"}
+                headers = {"Content-Type": "application/json", "x-goog-api-key": self.gemini_key}
                 payload = {
                     "contents": [{
                         "parts": [
@@ -292,7 +332,7 @@ class LLMClient:
                             {"inlineData": {"mimeType": "image/png", "data": img_b64}}
                         ]
                     }],
-                    "generationConfig": {"temperature": 0.0, "maxOutputTokens": 256}
+                    "generationConfig": {"temperature": 0.0, "maxOutputTokens": 512}
                 }
                 req = urllib.request.Request(endpoint, data=json.dumps(payload).encode('utf-8'), headers=headers, method='POST')
                 with urllib.request.urlopen(req, timeout=25) as resp:
@@ -304,11 +344,12 @@ class LLMClient:
                     candidates = data.get('candidates', [])
                     if candidates and 'content' in candidates[0]:
                         parts = candidates[0]['content'].get('parts', [])
-                        if parts:
-                            raw_text = parts[0].get('text', '').strip()
-                            val = self._parse_numeric_amount(raw_text)
-                            if val is not None:
-                                return val, f"live_vision:Google Gemini:{self.model_name}"
+                        for p in parts:
+                            if 'text' in p and p['text'].strip():
+                                raw_text = p['text'].strip()
+                                val = self._parse_numeric_amount(raw_text)
+                                if val is not None:
+                                    return val, f"live_vision:Google Gemini:{self.model_name}"
             except urllib.error.HTTPError as e:
                 try:
                     body = e.read().decode('utf-8', errors='ignore')
@@ -319,6 +360,9 @@ class LLMClient:
                 if e.code == 429 and ("PerDay" in safe_body or "RESOURCE_EXHAUSTED" in safe_body or "Quota exceeded" in safe_body):
                     self.gemini_exhausted = True
                     sys.stderr.write("Gemini daily quota limit reached. Disabling Gemini for subsequent calls.\n")
+                elif e.code in (400, 401, 403):
+                    self.gemini_exhausted = True
+                    sys.stderr.write(f"Gemini authentication/key error (HTTP {e.code}). Disabling Gemini.\n")
                 elif e.code == 429 and retry_429:
                     m_delay = re.search(r'retryDelay":\s*"(\d+)s"', safe_body)
                     wait_sec = int(m_delay.group(1)) + 2 if m_delay else 15
@@ -334,7 +378,60 @@ class LLMClient:
                 gemini_error = f"failed_call: Gemini {type(e).__name__}"
 
         # ---------------------------------------------------------------------
-        # Tier 2: Fallback Vision API (Groq)
+        # Tier 2: Secondary Vision API (OpenAI)
+        # ---------------------------------------------------------------------
+        openai_error = None
+        if self.openai_key and not self.openai_exhausted:
+            try:
+                self._apply_rate_limit()
+                endpoint = "https://api.openai.com/v1/chat/completions"
+                headers = {
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {self.openai_key}"
+                }
+                o_model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+                payload = {
+                    "model": o_model,
+                    "messages": [{
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt_text},
+                            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}}
+                        ]
+                    }],
+                    "temperature": 0.0,
+                    "max_tokens": 64
+                }
+                req = urllib.request.Request(endpoint, data=json.dumps(payload).encode('utf-8'), headers=headers, method='POST')
+                with urllib.request.urlopen(req, timeout=20) as resp:
+                    data = json.loads(resp.read().decode('utf-8'))
+                    usage = data.get('usage', {})
+                    in_tok = usage.get('prompt_tokens', 0)
+                    out_tok = usage.get('completion_tokens', 0)
+                    self._record_usage(in_tok, out_tok, o_model)
+                    raw_text = data['choices'][0]['message']['content'].strip()
+                    val = self._parse_numeric_amount(raw_text)
+                    if val is not None:
+                        return val, f"live_vision:OpenAI:{o_model}"
+            except urllib.error.HTTPError as e:
+                try:
+                    body = e.read().decode('utf-8', errors='ignore')
+                except Exception:
+                    body = ""
+                safe_body = self._sanitize(body)
+                sys.stderr.write(f"OpenAI Vision HTTP {e.code} on {image_path.name}: {safe_body}\n")
+                if e.code in (401, 403):
+                    self.openai_exhausted = True
+                    sys.stderr.write(f"OpenAI key invalid/unauthorized (HTTP {e.code}). Disabling OpenAI.\n")
+                snippet = safe_body[:100].replace('\n', ' ').strip()
+                openai_error = f"failed_call: OpenAI HTTP {e.code} ({snippet})"
+            except Exception as e:
+                safe_err = self._sanitize(f"{type(e).__name__}: {str(e)}")
+                sys.stderr.write(f"OpenAI Vision Exception on {image_path.name}: {safe_err}\n")
+                openai_error = f"failed_call: OpenAI {type(e).__name__}"
+
+        # ---------------------------------------------------------------------
+        # Tier 3: Fallback Vision API (Groq)
         # ---------------------------------------------------------------------
         groq_error = None
         if self.groq_key and not self.groq_exhausted:
@@ -389,7 +486,7 @@ class LLMClient:
                     sys.stderr.write(f"Groq Vision Exception ({g_model}) on {image_path.name}: {safe_err}\n")
                     groq_error = f"failed_call: Groq {type(e).__name__}"
 
-        return None, gemini_error or groq_error or "failed_call: all vision providers failed"
+        return None, gemini_error or openai_error or groq_error or "failed_call: all vision providers failed"
 
     def _parse_numeric_amount(self, text: str) -> float:
         """Extracts clean numeric float from LLM text response."""
